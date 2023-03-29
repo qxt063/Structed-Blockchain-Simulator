@@ -58,4 +58,13 @@ public class TreeIndexTest {
 //            System.out.printf("%d:%s\n", kvw.getKey(), kvw.getValue());
         }
     }
+
+    @Test
+    public void rangeSearchTest(){
+        TreeIndex index = new TreeIndex("/home/sayumi/blockdata/tx500/multi/inblock_index/collect-50-did-1", false, false);
+        TreeMap<Long, List<String>> res = index.findByRange(1979L, 3000L);
+//        TreeMap<Long, List<String>> res = index.findByRange(1040L, 3000L);
+        System.out.println(res);
+//        index.close()
+    }
 }

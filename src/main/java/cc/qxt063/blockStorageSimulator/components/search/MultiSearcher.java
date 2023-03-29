@@ -73,7 +73,6 @@ public class MultiSearcher implements Searcher {
     public long searchCollectByDid(long did) {
         // TODO: 这里所有的无索引查询（块内索引查询）的blockHeight都是有问题的。传入的blockMax应该为版本链。理论值应该比blockMax小一些
         // Todo not to do 但是这里无所谓，因为每个区块都有这个语义的数据，就当测最差性能了
-        //  (人和代码有一个能跑就行)
 
         long start = System.currentTimeMillis();
         int bucketNum = (int) BucketUtils.getDidBucket(did);
@@ -105,30 +104,85 @@ public class MultiSearcher implements Searcher {
 //        return System.currentTimeMillis() - start;
         // 区块IO需要合并，不然IO开销巨大，先返回索引搜索时间，下同
         if (ptsStr == null) return -1L;
-        Set<String> blockToRead = new HashSet<>(); // IO合并
+        Map<String, List<String>> blockTxToRead = new HashMap<>();
         for (Map.Entry<Long, List<String>> ptsEntry : ptsStr.entrySet()) {
             for (String ptStr : ptsEntry.getValue()) {
                 String[] pt = ptStr.split(":");
-                blockToRead.add(pt[0]); //IO合并
+                if (!blockTxToRead.containsKey(pt[0])) {
+                    blockTxToRead.put(pt[0], new ArrayList<>());
+                }
+                blockTxToRead.get(pt[0]).add(pt[1]); //IO合并
 //                DataTransaction tx = JsonUtils.fromJson(FileUtils.readFromFile(
 //                        txPath_inst + "/" + pt[0] + "/" + pt[1]), DataTransaction.class);
 //                System.out.println(tx);
             }
         }
-        // 区块IO
-        for (String blkHeight : blockToRead) {
-            Block b = JsonUtils.fromJson(FileUtils.readFromFile(bPath_inst + "/" + blkHeight), Block.class);
+        // 模拟区块IO
+        for (Map.Entry<String, List<String>> e : blockTxToRead.entrySet()) {
+            for (int i = 0; i < Math.max(e.getValue().size() / 5, 1); i++) { //模拟IO合并程度，依据区块大小和磁盘分页而定
+                DataTransaction tx = JsonUtils.fromJson(FileUtils.readFromFile(
+                        txPath_inst + "/" + e.getKey() + "/" + e.getValue().get(i)), DataTransaction.class);
+            }
         }
 
         return System.currentTimeMillis() - start;
     }
 
-    //3. 无IO索引查询范围 -> 查询 instruction.did
-    public long searchRangeInstByDid_noIO(long min, long max) {
-        long start = System.currentTimeMillis();
+    //3. 索引查询范围(计算IO时间) -> 查询 instruction.did
+    public long[] searchRangeInstByDid_withIOTime(long min, long max) {
+        long start = System.currentTimeMillis(), totalIOTime = 0L;
         TreeMap<Long, List<String>> ptsStr = index_instDid.findByRange(min, max);
-        return System.currentTimeMillis() - start;
+//        return System.currentTimeMillis() - start;
+        // 区块IO需要合并，不然IO开销巨大，先返回索引搜索时间，下同
+        if (ptsStr == null) return new long[]{-1L, -1L};
+        Map<String, List<String>> blockTxToRead = new HashMap<>(); // IO合并
+        for (Map.Entry<Long, List<String>> ptsEntry : ptsStr.entrySet()) {
+            for (String ptStr : ptsEntry.getValue()) {
+                String[] pt = ptStr.split(":");
+                if (!blockTxToRead.containsKey(pt[0])) {
+                    blockTxToRead.put(pt[0], new ArrayList<>());
+                }
+                blockTxToRead.get(pt[0]).add(pt[1]); //IO合并
+//                DataTransaction tx = JsonUtils.fromJson(FileUtils.readFromFile(
+//                        txPath_inst + "/" + pt[0] + "/" + pt[1]), DataTransaction.class);
+//                System.out.println(tx);
+            }
+        }
+        long ioTime = System.currentTimeMillis();
+        // 模拟区块IO
+//        long cnt = 0L;
+        for (Map.Entry<String, List<String>> e : blockTxToRead.entrySet()) {
+//            cnt += e.getValue().size();
+            for (int i = 0; i < Math.max(e.getValue().size() / 5, 1); i++) { //模拟IO合并程度，依据区块大小和磁盘分页而定
+                DataTransaction tx = JsonUtils.fromJson(FileUtils.readFromFile(
+                        txPath_inst + "/" + e.getKey() + "/" + e.getValue().get(i)), DataTransaction.class);
+            }
+        }
+        totalIOTime += System.currentTimeMillis() - ioTime;
+//        System.out.println("index cnt: " + cnt);
+        return new long[]{System.currentTimeMillis() - start, totalIOTime};
     }
+
+    //3. 索引查询范围(计算IO时间) -> 查询 instruction.did
+    public long[] searchRangeInstByDid_noMerge_withIOTime(long min, long max) {
+        long start = System.currentTimeMillis(), totalIOTime = 0L;
+        TreeMap<Long, List<String>> ptsStr = index_instDid.findByRange(min, max);
+//        return System.currentTimeMillis() - start;
+        // 区块IO需要合并，不然IO开销巨大，先返回索引搜索时间，下同
+        if (ptsStr == null) return new long[]{-1L, -1L};
+        for (Map.Entry<Long, List<String>> ptsEntry : ptsStr.entrySet()) {
+            long ioTime = System.currentTimeMillis();
+            for (String ptStr : ptsEntry.getValue()) {
+                String[] pt = ptStr.split(":");
+                DataTransaction tx = JsonUtils.fromJson(FileUtils.readFromFile(
+                        txPath_inst + "/" + pt[0] + "/" + pt[1]), DataTransaction.class);
+//                System.out.println(tx);
+            }
+            totalIOTime += System.currentTimeMillis() - ioTime;
+        }
+        return new long[]{System.currentTimeMillis() - start, totalIOTime};
+    }
+
 
     //4. 无索引查询范围 -> 查询 collect.did
     @Override
@@ -136,11 +190,11 @@ public class MultiSearcher implements Searcher {
         long start = System.currentTimeMillis();
         int bucketNumMin = (int) BucketUtils.getDidBucket(min);
         int bucketNumMax = (int) BucketUtils.getDidBucket(max);
-        Set<Integer> blockToRead = new HashSet<>(); // IO合并
         // 区块从1开始
         for (int blockHeight = blockMax; blockHeight > 0; blockHeight--) {
             Block b = JsonUtils.fromJson(FileUtils.readFromFile(bPath_collect + "/" + blockHeight), Block.class);
             DataSpecial bs = (DataSpecial) b.getHeader().getSpecial();
+            List<String> txToRead = new ArrayList<>();
             // 遍历桶，读取桶索引
             for (int bucketNum = bucketNumMin; bucketNum <= bucketNumMax; bucketNum++) {
                 if (bs.getBuckets().get("did").charAt(bucketNum) != '1') continue;
@@ -148,40 +202,37 @@ public class MultiSearcher implements Searcher {
                 TreeIndex index = new TreeIndex(String.format(indexPattern_inBlockCollectDid, blockHeight, bucketNum)
                         , false, false);
                 // 范围搜索，替换范围
-                long[] range = BucketUtils.getDidBucketRange(bucketNum);
-                if (bucketNum == bucketNumMin) range[0] = min;
-                if (bucketNum == bucketNumMax) range[1] = max;
+//                long[] range = BucketUtils.getDidBucketRange(bucketNum);
+//                if (bucketNum == bucketNumMin) range[0] = min;
+//                if (bucketNum == bucketNumMax) range[1] = max;
 
                 TreeMap<Long, List<String>> ptsStr = index.findByRange(min, max);
                 if (ptsStr == null) return -1L;
-                blockToRead.add(blockHeight); // 合并IO
-//                for (Map.Entry<Long, List<String>> ptsEntry : ptsStr.entrySet()) {
-//                    for (String ptStr : ptsEntry.getValue()) {
-//                        DataTransaction tx = JsonUtils.fromJson(FileUtils.readFromFile(
-//                                txPath_collect + "/" + blockHeight + "/" + ptStr), DataTransaction.class);
-////                        System.out.println(tx);
-//                    }
-//                }
+                for (Map.Entry<Long, List<String>> ptsEntry : ptsStr.entrySet()) {
+                    txToRead.addAll(ptsEntry.getValue());
+                }
             }
-        }
-
-        // 区块IO
-        for (Integer blkHeight : blockToRead) {
-            Block b = JsonUtils.fromJson(FileUtils.readFromFile(bPath_collect + "/" + blkHeight), Block.class);
+            // 模拟区块IO
+            for (int i = 0; i < Math.max(txToRead.size() / 5, 1); i++) { //模拟IO合并程度，依据区块大小和磁盘分页而定
+                DataTransaction tx = JsonUtils.fromJson(FileUtils.readFromFile(
+                        txPath_collect + "/" + blockHeight + "/" + txToRead.get(i)), DataTransaction.class);
+            }
         }
         return System.currentTimeMillis() - start;
     }
 
 
-    //4. 无IO无索引查询范围 -> 查询 collect.did
-    public long searchRangeCollectByDid_noIO(long min, long max) {
-        long start = System.currentTimeMillis();
+    //4. 无索引查询范围(计算IO时间) -> 查询 collect.did
+    public long[] searchRangeCollectByDid_withIOTime(long min, long max) {
+        long start = System.currentTimeMillis(), totalIOTime = 0L;
+//        long cnt = 0L;
         int bucketNumMin = (int) BucketUtils.getDidBucket(min);
         int bucketNumMax = (int) BucketUtils.getDidBucket(max);
         // 区块从1开始
         for (int blockHeight = blockMax; blockHeight > 0; blockHeight--) {
             Block b = JsonUtils.fromJson(FileUtils.readFromFile(bPath_collect + "/" + blockHeight), Block.class);
             DataSpecial bs = (DataSpecial) b.getHeader().getSpecial();
+            List<String> txToRead = new ArrayList<>(); // IO merge
             // 遍历桶，读取桶索引
             for (int bucketNum = bucketNumMin; bucketNum <= bucketNumMax; bucketNum++) {
                 if (bs.getBuckets().get("did").charAt(bucketNum) != '1') continue;
@@ -189,15 +240,32 @@ public class MultiSearcher implements Searcher {
                 TreeIndex index = new TreeIndex(String.format(indexPattern_inBlockCollectDid, blockHeight, bucketNum)
                         , false, false);
                 // 范围搜索，替换范围
-                long[] range = BucketUtils.getDidBucketRange(bucketNum);
-                if (bucketNum == bucketNumMin) range[0] = min;
-                if (bucketNum == bucketNumMax) range[1] = max;
+//                long[] range = BucketUtils.getDidBucketRange(bucketNum);
+//                if (bucketNum == bucketNumMin) range[0] = min;
+//                if (bucketNum == bucketNumMax) range[1] = max;
 
                 TreeMap<Long, List<String>> ptsStr = index.findByRange(min, max);
-                if (ptsStr == null) return -1L;
+                if (ptsStr == null) return new long[]{-1L, -1L};
+                for (Map.Entry<Long, List<String>> ptsEntry : ptsStr.entrySet()) {
+                    for (String ptStr : ptsEntry.getValue()) {
+                        txToRead.addAll(ptsEntry.getValue());
+//                        DataTransaction tx = JsonUtils.fromJson(FileUtils.readFromFile(
+//                                txPath_collect + "/" + blockHeight + "/" + ptStr), DataTransaction.class);
+//                        System.out.println(tx);
+                    }
+                }
             }
+            long ioTime = System.currentTimeMillis();
+            // 模拟区块IO
+            for (int i = 0; i < Math.max(txToRead.size() / 5, 1); i++) { //模拟IO合并程度，依据区块大小和磁盘分页而定
+                DataTransaction tx = JsonUtils.fromJson(FileUtils.readFromFile(
+                        txPath_collect + "/" + blockHeight + "/" + txToRead.get(i)), DataTransaction.class);
+            }
+            totalIOTime += System.currentTimeMillis() - ioTime;
+
         }
-        return System.currentTimeMillis() - start;
+//        System.out.println("no index cnt: " + cnt);
+        return new long[]{System.currentTimeMillis() - start, totalIOTime};
     }
 
     //5. 双索引连接 -> 查询 device.did = instruction.did
@@ -214,24 +282,71 @@ public class MultiSearcher implements Searcher {
             while (i.get(0).getK() < d.get(0).getK()) i = ididIt.next();
             // 相等
             if (d.get(0).getK() == i.get(0).getK()) {
+                List<DataTransaction> dtxs = new ArrayList<>(), itxs = new ArrayList<>();
+                // 读取d
                 for (KVPair dkv : d) {
                     String[] dpt = dkv.getV().split(":");
-                    DataTransaction dtx = JsonUtils.fromJson(FileUtils.readFromFile(
-                            txPath_device + "/" + dpt[0] + "/" + dpt[1]), DataTransaction.class);
-                    for (KVPair ikv : i) {
-                        String[] ipt = ikv.getV().split(":");
-                        DataTransaction itx = JsonUtils.fromJson(FileUtils.readFromFile(
-                                txPath_inst + "/" + ipt[0] + "/" + ipt[1]), DataTransaction.class);
-                        // connect
-//                        System.out.println(dtx.getAttributeData().get("did") + " : " + itx.getAttributeData().get("did") +
-//                                "\tat inst block\t" + ipt[0]);
-                    }
+                    dtxs.add(JsonUtils.fromJson(FileUtils.readFromFile(
+                            txPath_device + "/" + dpt[0] + "/" + dpt[1]), DataTransaction.class));
                 }
+                // 读取i
+                for (KVPair ikv : i) {
+                    String[] ipt = ikv.getV().split(":");
+                    itxs.add(JsonUtils.fromJson(FileUtils.readFromFile(
+                            txPath_inst + "/" + ipt[0] + "/" + ipt[1]), DataTransaction.class));
+                }
+                // connect
+//                for (DataTransaction dtx : dtxs) {
+//                    for (DataTransaction itx : itxs) {
+//                        System.out.println(dtx + " connect " + itx);
+//                    }
+//                }
             }
             if (ddidIt.hasNext()) d = ddidIt.next();
             if (ididIt.hasNext()) i = ididIt.next();
         }
         return System.currentTimeMillis() - start;
+    }
+
+    //5. 双索引连接（计算IO时间） -> 查询 device.did = instruction.did
+    public long[] searchDeviceDidEqualsInstDid_withIOTime() {
+        long start = System.currentTimeMillis(), totalIOTime = 0L;
+        Iterator<List<KVPair>> ddidIt = index_deviceId.iterator(), ididIt = index_instDid.iterator();
+        if (!ddidIt.hasNext() || !ididIt.hasNext()) {
+            return new long[]{-1L, -1L};
+        }
+        List<KVPair> d = ddidIt.next(), i = ididIt.next();
+        while (ddidIt.hasNext() && ididIt.hasNext()) {
+            while (d.get(0).getK() < i.get(0).getK()) d = ddidIt.next();
+            while (i.get(0).getK() < d.get(0).getK()) i = ididIt.next();
+            // 相等
+            if (d.get(0).getK() == i.get(0).getK()) {
+                long ioTime = System.currentTimeMillis();
+                List<DataTransaction> dtxs = new ArrayList<>(), itxs = new ArrayList<>();
+                // 读取d
+                for (KVPair dkv : d) {
+                    String[] dpt = dkv.getV().split(":");
+                    dtxs.add(JsonUtils.fromJson(FileUtils.readFromFile(
+                            txPath_device + "/" + dpt[0] + "/" + dpt[1]), DataTransaction.class));
+                }
+                // 读取i
+                for (KVPair ikv : i) {
+                    String[] ipt = ikv.getV().split(":");
+                    itxs.add(JsonUtils.fromJson(FileUtils.readFromFile(
+                            txPath_inst + "/" + ipt[0] + "/" + ipt[1]), DataTransaction.class));
+                }
+                // connect
+//                for (DataTransaction dtx : dtxs) {
+//                    for (DataTransaction itx : itxs) {
+//                        System.out.println(dtx + " connect " + itx);
+//                    }
+//                }
+                totalIOTime += System.currentTimeMillis() - ioTime;
+            }
+            if (ddidIt.hasNext()) d = ddidIt.next();
+            if (ididIt.hasNext()) i = ididIt.next();
+        }
+        return new long[]{System.currentTimeMillis() - start, totalIOTime};
     }
 
     //6. 索引-非索引连接(仅查询：构建哈希；验证：块内索引) -> 查询 device.did = collect.did
@@ -290,19 +405,23 @@ public class MultiSearcher implements Searcher {
             while (ddidIt.hasNext() && d.get(0).getK() < BucketUtils.getDidBucketRange(bucketNum)[1]) {
                 long k = d.get(0).getK();
                 if (map.containsKey(k)) {
+                    List<DataTransaction> dtxs = new ArrayList<>(), ctxs = new ArrayList<>();
                     for (KVPair dkv : d) {
                         String[] dpt = dkv.getV().split(":");
-                        DataTransaction dtx = JsonUtils.fromJson(FileUtils.readFromFile(
-                                txPath_device + "/" + dpt[0] + "/" + dpt[1]), DataTransaction.class);
-                        for (String cptWithH : map.get(k)) {
-                            String[] cpt = cptWithH.split(":");
-                            DataTransaction ctx = JsonUtils.fromJson(FileUtils.readFromFile(
-                                    txPath_collect + "/" + cpt[0] + "/" + cpt[1]), DataTransaction.class);
-                            // connect
-//                            System.out.println(dtx.getAttributeData().get("did") + " : " + ctx.getAttributeData().get("did") +
-//                                    "\tat collect block\t" + cpt[0]);
-                        }
+                        dtxs.add(JsonUtils.fromJson(FileUtils.readFromFile(
+                                txPath_device + "/" + dpt[0] + "/" + dpt[1]), DataTransaction.class));
                     }
+                    for (String cptWithH : map.get(k)) {
+                        String[] cpt = cptWithH.split(":");
+                        ctxs.add(JsonUtils.fromJson(FileUtils.readFromFile(
+                                txPath_collect + "/" + cpt[0] + "/" + cpt[1]), DataTransaction.class));
+                    }
+                    // connect
+//                    for (DataTransaction dtx : dtxs) {
+//                        for (DataTransaction ctx : ctxs) {
+//                            System.out.println(dtx + " connect " + ctx);
+//                        }
+//                    }
                 }
                 d = ddidIt.next();
             }
@@ -357,6 +476,68 @@ public class MultiSearcher implements Searcher {
         return System.currentTimeMillis() - allTime;
     }
 
+    /**
+     * 6. 索引-非索引连接(计算IO时间) -> 查询 device.did = collect.did
+     *
+     * @return long[allTime, IOTime, bucketTime]
+     */
+    public long[] searchDeviceDidEqualsCollectDid_withIOTime() {
+        long allTime = System.currentTimeMillis(), totalIOTime = 0L, bucketTime = System.currentTimeMillis();
+
+        // 区块从1开始，读取出所有的区块bucket
+        List<String> buckets = new ArrayList<>(blockMax + 5);
+        for (int blockHeight = 1; blockHeight <= blockMax; blockHeight++) {
+            Block b = JsonUtils.fromJson(FileUtils.readFromFile(bPath_collect + "/" + blockHeight), Block.class);
+            DataSpecial bs = (DataSpecial) b.getHeader().getSpecial();
+            buckets.add(bs.getBuckets().get("did"));
+        }
+        bucketTime = System.currentTimeMillis() - bucketTime;
+
+        // 有索引的只用遍历一遍
+        Iterator<List<KVPair>> ddidIt = index_deviceId.iterator();
+        List<KVPair> d = ddidIt.next();
+        // 遍历桶，读取桶索引
+        for (int bucketNum = 0; bucketNum <= 9; bucketNum++) {
+
+            // 索引内哈希连接
+            Map<Long, List<String>> map = new HashMap<>();
+            for (int blockHeight_1 = 0; blockHeight_1 < buckets.size(); blockHeight_1++) {
+                String bucket = buckets.get(blockHeight_1);
+                if (bucket.charAt(bucketNum) != '1')
+                    continue;
+//                System.out.println("load\t" + blockHeight_1 + 1 + ":" + bucketNum);
+                TreeIndex index = new TreeIndex(String.format(
+                        indexPattern_inBlockCollectDid, blockHeight_1 + 1, bucketNum), false, false);
+                for (Map.Entry<Long, List<String>> e : index.getAllNodesWithHeight(blockHeight_1 + 1).entrySet()) {
+                    if (!map.containsKey(e.getKey())) map.put(e.getKey(), e.getValue());
+                    else map.get(e.getKey()).addAll(e.getValue());
+                }
+                index.close();
+            }
+            while (ddidIt.hasNext() && d.get(0).getK() < BucketUtils.getDidBucketRange(bucketNum)[1]) {
+                long k = d.get(0).getK();
+                if (map.containsKey(k)) {
+                    long ioTime = System.currentTimeMillis();
+                    List<DataTransaction> dtxs = new ArrayList<>(), ctxs = new ArrayList<>();
+                    for (KVPair dkv : d) {
+                        String[] dpt = dkv.getV().split(":");
+                        dtxs.add(JsonUtils.fromJson(FileUtils.readFromFile(
+                                txPath_device + "/" + dpt[0] + "/" + dpt[1]), DataTransaction.class));
+                    }
+                    for (String cptWithH : map.get(k)) {
+                        String[] cpt = cptWithH.split(":");
+                        ctxs.add(JsonUtils.fromJson(FileUtils.readFromFile(
+                                txPath_collect + "/" + cpt[0] + "/" + cpt[1]), DataTransaction.class));
+                    }
+                    totalIOTime += System.currentTimeMillis() - ioTime;
+                }
+                d = ddidIt.next();
+            }
+        }
+
+        return new long[]{System.currentTimeMillis() - allTime, totalIOTime, bucketTime};
+    }
+
     //7. 双非索引连接(仅查询：构建哈希；验证：块内索引) -> 查询 collect.did = collect.did
     @Override
     public long searchCollectDidEqualsCollectDid() {
@@ -393,27 +574,92 @@ public class MultiSearcher implements Searcher {
                         indexPattern_inBlockCollectDid, blockHeight_1 + 1, bucketNum), false, false);
                 for (Map.Entry<Long, List<String>> e : index.getAllNodesWithHeight(blockHeight_1 + 1).entrySet()) {
                     if (m1.containsKey(e.getKey())) {
-                        // connect
+                        List<DataTransaction> ctxs1 = new ArrayList<>(), ctxs2 = new ArrayList<>();
                         for (String c1 : m1.get(e.getKey())) {
                             String[] cpt1 = c1.split(":");
-                            for (String c2 : e.getValue()) {
-                                String[] cpt2 = c2.split(":");
-                                // 连接spt1和spt2
-                                DataTransaction ctx1 = JsonUtils.fromJson(FileUtils.readFromFile(
-                                        txPath_collect + "/" + cpt1[0] + "/" + cpt1[1]), DataTransaction.class);
-                                DataTransaction ctx2 = JsonUtils.fromJson(FileUtils.readFromFile(
-                                        txPath_collect + "/" + cpt2[0] + "/" + cpt2[1]), DataTransaction.class);
-//                                System.out.println(ctx1.getAttributeData().get("did") + "\tat collect 1 block\t" + cpt1[0]);
-                            }
+                            ctxs1.add(JsonUtils.fromJson(FileUtils.readFromFile(
+                                    txPath_collect + "/" + cpt1[0] + "/" + cpt1[1]), DataTransaction.class));
                         }
+                        for (String c2 : e.getValue()) {
+                            String[] cpt2 = c2.split(":");
+                            ctxs2.add(JsonUtils.fromJson(FileUtils.readFromFile(
+                                    txPath_collect + "/" + cpt2[0] + "/" + cpt2[1]), DataTransaction.class));
+                        }
+                        // connect
+//                        for (DataTransaction ctx1 : ctxs1) {
+//                            for (DataTransaction ctx2 : ctxs2) {
+//                                System.out.println(ctx1 + " connect " + ctx2);
+//                            }
+//                        }
+
                     }
                 }
                 index.close();
             }
+        }
+        return System.currentTimeMillis() - start;
+    }
 
+    //7. 双非索引连接(计算IO时间) -> 查询 collect.did = collect.did
+    public long[] searchCollectDidEqualsCollectDid_withIOTime() {
+        long start = System.currentTimeMillis(), totalIOTime = 0L;
+        // 哈希连接，遍历区块按桶进行连接
+        List<String> buckets = new ArrayList<>(blockMax + 5);
+        for (int blockHeight = 1; blockHeight <= blockMax; blockHeight++) {
+            Block b = JsonUtils.fromJson(FileUtils.readFromFile(bPath_collect + "/" + blockHeight), Block.class);
+            DataSpecial bs = (DataSpecial) b.getHeader().getSpecial();
+            buckets.add(bs.getBuckets().get("did"));
         }
 
-        return System.currentTimeMillis() - start;
+        for (int bucketNum = 0; bucketNum <= 9; bucketNum++) {
+            Map<Long, List<String>> m1 = new HashMap<>();
+            for (int blockHeight_1 = 0; blockHeight_1 < buckets.size(); blockHeight_1++) {
+                String bucket = buckets.get(blockHeight_1);
+                if (bucket.charAt(bucketNum) != '1')
+                    continue;
+//                System.out.println("load\t" + blockHeight_1 + 1 + ":" + bucketNum);
+                TreeIndex index = new TreeIndex(String.format(
+                        indexPattern_inBlockCollectDid, blockHeight_1 + 1, bucketNum), false, false);
+                for (Map.Entry<Long, List<String>> e : index.getAllNodesWithHeight(blockHeight_1 + 1).entrySet()) {
+                    if (!m1.containsKey(e.getKey())) m1.put(e.getKey(), e.getValue());
+                    else m1.get(e.getKey()).addAll(e.getValue());
+                }
+                index.close();
+            }
+            // 连接 同一个桶
+            for (int blockHeight_1 = 0; blockHeight_1 < buckets.size(); blockHeight_1++) {
+                String bucket = buckets.get(blockHeight_1);
+                if (bucket.charAt(bucketNum) != '1')
+                    continue;
+                TreeIndex index = new TreeIndex(String.format(
+                        indexPattern_inBlockCollectDid, blockHeight_1 + 1, bucketNum), false, false);
+                for (Map.Entry<Long, List<String>> e : index.getAllNodesWithHeight(blockHeight_1 + 1).entrySet()) {
+                    if (m1.containsKey(e.getKey())) {
+                        long ioTime = System.currentTimeMillis();
+                        List<DataTransaction> ctxs1 = new ArrayList<>(), ctxs2 = new ArrayList<>();
+                        for (String c1 : m1.get(e.getKey())) {
+                            String[] cpt1 = c1.split(":");
+                            ctxs1.add(JsonUtils.fromJson(FileUtils.readFromFile(
+                                    txPath_collect + "/" + cpt1[0] + "/" + cpt1[1]), DataTransaction.class));
+                        }
+                        for (String c2 : e.getValue()) {
+                            String[] cpt2 = c2.split(":");
+                            ctxs2.add(JsonUtils.fromJson(FileUtils.readFromFile(
+                                    txPath_collect + "/" + cpt2[0] + "/" + cpt2[1]), DataTransaction.class));
+                        }
+                        // connect
+//                        for (DataTransaction ctx1 : ctxs1) {
+//                            for (DataTransaction ctx2 : ctxs2) {
+//                                System.out.println(ctx1 + " connect " + ctx2);
+//                            }
+//                        }
+                        totalIOTime += System.currentTimeMillis() - ioTime;
+                    }
+                }
+                index.close();
+            }
+        }
+        return new long[]{System.currentTimeMillis() - start, totalIOTime};
     }
 
 }

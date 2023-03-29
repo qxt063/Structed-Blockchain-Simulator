@@ -613,8 +613,8 @@ public class BPlusTree implements Iterable<List<KVPair>> {
         else {
             sMax = searchKey(maxKey, unique);
             int i = sMax.getIndex();
-//            while(i >= 0 && sMax.getLeaf().getKeyAt(i) >= minKey) {
-            while (i >= 0 && i < sMax.getLeaf().getKeyArrayLen() &&
+            if (i >= sMax.getLeaf().getKeyArrayLen()) i--;
+            while (i >= 0 &&
                     sMax.getLeaf().getKeyAt(i) <= maxKey && sMax.getLeaf().getKeyAt(i) >= minKey) {
                 rangeQueryResult.getQueryResult().
                         add(new KVPair(sMax.getLeaf().getKeyAt(i),
